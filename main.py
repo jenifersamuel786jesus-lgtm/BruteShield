@@ -47,7 +47,11 @@ def score_event(ip, username, failed, interval, account_count, source="simulated
 
 def make_event(ip, username, success=False, failed=1, interval=4.0, scenario="simulated"):
     score, level, reasons, confidence=score_event(ip, username, failed, interval, 1 if scenario=="benign" else random.randint(1,5))
-    ev={"id":str(uuid.uuid4())[:8],"timestamp":iso(now()),"ip":ip,"username":username,"event_type":"success" if success else "failed_login","success":success,"source":"synthetic_lab" if scenario!="application" else "demo_app","scenario":scenario,"risk_score":score,"risk_level":level,"confidence":round(confidence,2),"evidence":reasons or ["No strong anomaly signal; likely legitimate activity"],"model":"rules+isolation-forest-compatible","action":"blocked" if (ip in BLOCKED and not success) else "observed"}
+    action="observed"
+    if not success and ip in BLOCKED and ip not in ALLOWLIST: action="blocked"
+    elif not success and SETTINGS["auto_block"] and not SETTINGS["dry_run"] and level in ("high","critical") and ip not in ALLOWLIST:
+        BLOCKED.add(ip); action="blocked"
+    ev={"id":str(uuid.uuid4())[:8],"timestamp":iso(now()),"ip":ip,"username":username,"event_type":"success" if success else "failed_login","success":success,"source":"synthetic_lab" if scenario!="application" else "demo_app","scenario":scenario,"risk_score":score,"risk_level":level,"confidence":round(confidence,2),"evidence":reasons or ["No strong anomaly signal; likely legitimate activity"],"model":"rules+explainable-baseline","action":action}
     EVENTS.insert(0,ev); EVENTS[:] = EVENTS[:500]
     if level in ("high","critical"):
         ACTIONS.insert(0,{"id":str(uuid.uuid4())[:8],"timestamp":ev["timestamp"],"type":"alert","ip":ip,"reason":"; ".join(ev["evidence"]),"status":"open"})
@@ -79,7 +83,13 @@ def alerts(): return ACTIONS[:100]
 def summary():
     total=len(EVENTS); failed=sum(not e["success"] for e in EVENTS); success=total-failed
     levels=Counter(e["risk_level"] for e in EVENTS); sources=len(set(e["ip"] for e in EVENTS)); blocked=sum(e["action"]=="blocked" for e in EVENTS)
-    return {"total_attempts":total,"failed_logins":failed,"successful_logins":success,"attacks_detected":sum(levels[x] for x in ["high","critical"]),"attempts_blocked":blocked,"unique_ips":sources,"active_threats":levels["critical"]+levels["high"],"avg_detection_ms":round(84+random.random()*35),"false_positive_rate":2.8,"posture_score":max(0, min(100, 92-len(BLOCKED)*2-levels["critical"]*3)),"risk_distribution":dict(levels),"blocked_ips":list(BLOCKED),"allowlisted_ips":list(ALLOWLIST),"model_status":"rules + anomaly baseline","lab_mode":True}
+    high=levels["high"]; critical=levels["critical"]
+    # Posture reflects current threat pressure and control readiness; it is not a lifetime event counter.
+    recent=EVENTS[:80]; recent_levels=Counter(e["risk_level"] for e in recent); recent_total=max(1,len(recent))
+    pressure=min(42, (recent_levels["critical"]/recent_total)*42 + (recent_levels["high"]/recent_total)*18)
+    readiness=0 if SETTINGS["dry_run"] else 8
+    posture=round(max(0, min(100, 100-pressure-(12 if SETTINGS["dry_run"] else 0)+min(5,len(ALLOWLIST)))))
+    return {"total_attempts":total,"failed_logins":failed,"successful_logins":success,"attacks_detected":high+critical,"attempts_blocked":blocked,"unique_ips":sources,"active_threats":critical+high,"avg_detection_ms":round(84+random.random()*35),"false_positive_rate":2.8,"posture_score":posture,"risk_distribution":dict(levels),"blocked_ips":list(BLOCKED),"allowlisted_ips":list(ALLOWLIST),"model_status":"rules + explainable baseline","lab_mode":True,"dry_run":SETTINGS["dry_run"],"auto_block":SETTINGS["auto_block"],"window_seconds":SETTINGS["window_seconds"],"failure_threshold":SETTINGS["failure_threshold"],"critical_threshold":SETTINGS["critical_threshold"]}
 @app.post("/api/simulate")
 async def simulate(req:SimulateRequest):
     created=[]
